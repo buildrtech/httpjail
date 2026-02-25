@@ -4,9 +4,9 @@
 //! code executed via the V8 engine. It supports automatic file reloading when rules
 //! are loaded from a file path.
 
-use crate::rules::common::{RequestInfo, RuleResponse};
+use crate::rules::common::{ParsedRuleResult, RequestInfo, RuleResponse};
 use crate::rules::console_log;
-use crate::rules::{EvaluationResult, RuleEngineTrait};
+use crate::rules::{EvaluationResult, HeaderRewrites, RuleEngineTrait};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use hyper::Method;
@@ -93,12 +93,17 @@ impl V8JsRuleEngine {
         method: &Method,
         url: &str,
         requester_ip: &str,
-    ) -> (bool, Option<String>, Option<u64>) {
+    ) -> ParsedRuleResult {
         let request_info = match RequestInfo::from_request(method, url, requester_ip) {
             Ok(info) => info,
             Err(e) => {
                 warn!("Failed to parse request info: {}", e);
-                return (false, Some("Invalid request format".to_string()), None);
+                return (
+                    false,
+                    Some("Invalid request format".to_string()),
+                    None,
+                    None,
+                );
             }
         };
 
@@ -110,7 +115,12 @@ impl V8JsRuleEngine {
             Ok(result) => result,
             Err(e) => {
                 warn!("JavaScript execution failed: {}", e);
-                (false, Some("JavaScript execution failed".to_string()), None)
+                (
+                    false,
+                    Some("JavaScript execution failed".to_string()),
+                    None,
+                    None,
+                )
             }
         }
     }
@@ -166,7 +176,7 @@ impl V8JsRuleEngine {
         isolate: &mut v8::OwnedIsolate,
         js_code: &str,
         request_info: &RequestInfo,
-    ) -> Result<(bool, Option<String>, Option<u64>), Box<dyn std::error::Error>> {
+    ) -> Result<ParsedRuleResult, Box<dyn std::error::Error>> {
         let handle_scope = &mut v8::HandleScope::new(isolate);
         let context = v8::Context::new(handle_scope, Default::default());
         let context_scope = &mut v8::ContextScope::new(handle_scope, context);
@@ -225,7 +235,8 @@ impl V8JsRuleEngine {
 
         // Use the common RuleResponse parser - exact same logic as proc engine
         let rule_response = RuleResponse::from_string(&response_str);
-        let (allowed, message, max_tx_bytes) = rule_response.to_evaluation_result();
+        let (allowed, message, max_tx_bytes, header_rewrites) =
+            rule_response.to_evaluation_result();
 
         debug!(
             "JS rule returned {} for {} {}",
@@ -238,7 +249,7 @@ impl V8JsRuleEngine {
             debug!("Deny message: {}", msg);
         }
 
-        Ok((allowed, message, max_tx_bytes))
+        Ok((allowed, message, max_tx_bytes, header_rewrites))
     }
 
     /// Execute JavaScript code with a given code string (can be called from blocking context)
@@ -246,7 +257,7 @@ impl V8JsRuleEngine {
     fn execute_with_code(
         js_code: &str,
         request_info: &RequestInfo,
-    ) -> Result<(bool, Option<String>, Option<u64>), Box<dyn std::error::Error>> {
+    ) -> Result<ParsedRuleResult, Box<dyn std::error::Error>> {
         // Create a new isolate for each execution (simpler approach)
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         Self::execute_with_isolate(&mut isolate, js_code, request_info)
@@ -310,13 +321,13 @@ impl V8JsRuleEngine {
     }
 
     /// Execute JavaScript in a blocking task to handle V8's single-threaded nature.
-    /// Returns (allowed, context, max_tx_bytes).
+    /// Returns (allowed, context, max_tx_bytes, header_rewrites).
     async fn execute_js_blocking(
         js_code: String,
         method: Method,
         url: &str,
         requester_ip: &str,
-    ) -> (bool, Option<String>, Option<u64>) {
+    ) -> ParsedRuleResult {
         let method_clone = method.clone();
         let url_clone = url.to_string();
         let ip_clone = requester_ip.to_string();
@@ -327,7 +338,12 @@ impl V8JsRuleEngine {
                 Ok(info) => info,
                 Err(e) => {
                     warn!("Failed to parse request info: {}", e);
-                    return (false, Some("Invalid request format".to_string()), None);
+                    return (
+                        false,
+                        Some("Invalid request format".to_string()),
+                        None,
+                        None,
+                    );
                 }
             };
 
@@ -335,14 +351,19 @@ impl V8JsRuleEngine {
                 Ok(result) => result,
                 Err(e) => {
                     warn!("JavaScript execution failed: {}", e);
-                    (false, Some("JavaScript execution failed".to_string()), None)
+                    (
+                        false,
+                        Some("JavaScript execution failed".to_string()),
+                        None,
+                        None,
+                    )
                 }
             }
         })
         .await
         .unwrap_or_else(|e| {
             warn!("Failed to spawn V8 evaluation task: {}", e);
-            (false, Some("Evaluation failed".to_string()), None)
+            (false, Some("Evaluation failed".to_string()), None, None)
         })
     }
 
@@ -351,6 +372,7 @@ impl V8JsRuleEngine {
         allowed: bool,
         context: Option<String>,
         max_tx_bytes: Option<u64>,
+        header_rewrites: Option<HeaderRewrites>,
     ) -> EvaluationResult {
         let mut result = if allowed {
             EvaluationResult::allow()
@@ -365,6 +387,9 @@ impl V8JsRuleEngine {
         if allowed {
             if let Some(bytes) = max_tx_bytes {
                 result = result.with_max_tx_bytes(bytes);
+            }
+            if let Some(headers) = header_rewrites {
+                result = result.with_header_rewrites(headers);
             }
         }
 
@@ -382,11 +407,11 @@ impl RuleEngineTrait for V8JsRuleEngine {
         let js_code = self.load_js_code();
 
         // Execute JavaScript in blocking task
-        let (allowed, context, max_tx_bytes) =
+        let (allowed, context, max_tx_bytes, header_rewrites) =
             Self::execute_js_blocking(js_code, method, url, requester_ip).await;
 
         // Build and return the result
-        Self::build_evaluation_result(allowed, context, max_tx_bytes)
+        Self::build_evaluation_result(allowed, context, max_tx_bytes, header_rewrites)
     }
 
     fn name(&self) -> &str {

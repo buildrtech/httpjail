@@ -2,7 +2,7 @@ use crate::proxy::{
     HTTPJAIL_HEADER, HTTPJAIL_HEADER_VALUE, ProxyContext, apply_request_byte_limit,
     create_connect_403_response_with_context, create_forbidden_response,
 };
-use crate::rules::Action;
+use crate::rules::{Action, HeaderRewrites};
 #[cfg(target_os = "macos")]
 use crate::tls::CertificateManager;
 use anyhow::Result;
@@ -486,8 +486,14 @@ async fn handle_decrypted_https_request(
     match evaluation.action {
         Action::Allow => {
             debug!("Request allowed: {}", full_url);
-            match proxy_https_request(req, &host, evaluation.max_tx_bytes, &context.loop_nonce)
-                .await
+            match proxy_https_request(
+                req,
+                &host,
+                evaluation.max_tx_bytes,
+                evaluation.header_rewrites.as_ref(),
+                &context.loop_nonce,
+            )
+            .await
             {
                 Ok(resp) => Ok(resp),
                 Err(e) => {
@@ -508,6 +514,7 @@ async fn proxy_https_request(
     req: Request<Incoming>,
     host: &str,
     max_tx_bytes: Option<u64>,
+    header_rewrites: Option<&HeaderRewrites>,
     loop_nonce: &str,
 ) -> Result<Response<BoxBody<Bytes, HyperError>>> {
     // Build the target URL
@@ -522,7 +529,8 @@ async fn proxy_https_request(
     debug!("Forwarding request to: {}", target_url);
 
     // Prepare request for upstream using common function
-    let prepared_req = crate::proxy::prepare_upstream_request(req, target_uri, loop_nonce);
+    let prepared_req =
+        crate::proxy::prepare_upstream_request(req, target_uri, loop_nonce, header_rewrites);
 
     // Apply byte limit to outgoing request if specified, converting to BoxBody
     let new_req = if let Some(max_bytes) = max_tx_bytes {

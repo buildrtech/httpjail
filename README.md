@@ -53,6 +53,9 @@ httpjail --proc /path/to/filter.py -- ./my-app
 # stdin  -> {"method": "GET", "url": "https://api.github.com", "host": "api.github.com", ...}
 # stdout -> true
 
+# Rewrite/add request headers when a request is allowed
+httpjail --js "({allow: true, set_headers: {'x-httpjail-scope': 'sandbox'}})" -- curl https://api.github.com
+
 # Run as standalone proxy server (no command execution) and allow all
 httpjail --server --js "true"
 # Server defaults to ports 8080 (HTTP) and 8443 (HTTPS)

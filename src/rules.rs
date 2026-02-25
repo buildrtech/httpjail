@@ -7,6 +7,7 @@ pub mod v8_js;
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use hyper::Method;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -18,11 +19,14 @@ pub enum Action {
     Deny,
 }
 
+pub type HeaderRewrites = HashMap<String, String>;
+
 #[derive(Debug, Clone)]
 pub struct EvaluationResult {
     pub action: Action,
     pub context: Option<String>,
     pub max_tx_bytes: Option<u64>,
+    pub header_rewrites: Option<HeaderRewrites>,
 }
 
 impl EvaluationResult {
@@ -31,6 +35,7 @@ impl EvaluationResult {
             action: Action::Allow,
             context: None,
             max_tx_bytes: None,
+            header_rewrites: None,
         }
     }
 
@@ -39,6 +44,7 @@ impl EvaluationResult {
             action: Action::Deny,
             context: None,
             max_tx_bytes: None,
+            header_rewrites: None,
         }
     }
 
@@ -49,6 +55,11 @@ impl EvaluationResult {
 
     pub fn with_max_tx_bytes(mut self, max_tx_bytes: u64) -> Self {
         self.max_tx_bytes = Some(max_tx_bytes);
+        self
+    }
+
+    pub fn with_header_rewrites(mut self, header_rewrites: HeaderRewrites) -> Self {
+        self.header_rewrites = Some(header_rewrites);
         self
     }
 }

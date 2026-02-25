@@ -1,3 +1,4 @@
+use super::HeaderRewrites;
 use hyper::Method;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -75,7 +76,11 @@ pub struct RuleResponse {
     pub allow: Option<AllowPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deny_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set_headers: Option<HeaderRewrites>,
 }
+
+pub type ParsedRuleResult = (bool, Option<String>, Option<u64>, Option<HeaderRewrites>);
 
 impl RuleResponse {
     /// Parse a response from various formats
@@ -92,12 +97,14 @@ impl RuleResponse {
                 return RuleResponse {
                     allow: Some(AllowPolicy::Bool(true)),
                     deny_message: None,
+                    set_headers: None,
                 };
             }
             "false" => {
                 return RuleResponse {
                     allow: Some(AllowPolicy::Bool(false)),
                     deny_message: None,
+                    set_headers: None,
                 };
             }
             _ => {}
@@ -112,26 +119,32 @@ impl RuleResponse {
         RuleResponse {
             allow: Some(AllowPolicy::Bool(false)),
             deny_message: Some(trimmed.to_string()),
+            set_headers: None,
         }
     }
 
-    /// Convert to evaluation result tuple (allowed, context, max_tx_bytes)
+    /// Convert to evaluation result tuple
+    /// (allowed, context, max_tx_bytes, header_rewrites)
+    ///
     /// Following the rules:
     /// - If deny_message exists but allow is not set, default to deny
     /// - Only include context message when denying
     /// - max_tx_bytes is returned when allow policy has a byte limit
-    pub fn to_evaluation_result(&self) -> (bool, Option<String>, Option<u64>) {
+    /// - header rewrites are only returned for allowed requests
+    pub fn to_evaluation_result(&self) -> ParsedRuleResult {
         match &self.allow {
-            Some(AllowPolicy::Bool(true)) => (true, None, None),
-            Some(AllowPolicy::Bool(false)) => (false, self.deny_message.clone(), None),
-            Some(AllowPolicy::Limited { max_tx_bytes }) => (true, None, Some(*max_tx_bytes)),
+            Some(AllowPolicy::Bool(true)) => (true, None, None, self.set_headers.clone()),
+            Some(AllowPolicy::Bool(false)) => (false, self.deny_message.clone(), None, None),
+            Some(AllowPolicy::Limited { max_tx_bytes }) => {
+                (true, None, Some(*max_tx_bytes), self.set_headers.clone())
+            }
             None => {
                 // If allow is not specified but deny_message exists, default to deny
                 let allowed = self.deny_message.is_none();
                 if allowed {
-                    (true, None, None)
+                    (true, None, None, self.set_headers.clone())
                 } else {
-                    (false, self.deny_message.clone(), None)
+                    (false, self.deny_message.clone(), None, None)
                 }
             }
         }
@@ -187,49 +200,55 @@ mod tests {
         let resp = RuleResponse {
             allow: Some(AllowPolicy::Bool(true)),
             deny_message: None,
+            set_headers: None,
         };
-        assert_eq!(resp.to_evaluation_result(), (true, None, None));
+        assert_eq!(resp.to_evaluation_result(), (true, None, None, None));
 
         // Allow with message (message should be ignored)
         let resp = RuleResponse {
             allow: Some(AllowPolicy::Bool(true)),
             deny_message: Some("ignored".to_string()),
+            set_headers: None,
         };
-        assert_eq!(resp.to_evaluation_result(), (true, None, None));
+        assert_eq!(resp.to_evaluation_result(), (true, None, None, None));
 
         // Deny with message
         let resp = RuleResponse {
             allow: Some(AllowPolicy::Bool(false)),
             deny_message: Some("denied".to_string()),
+            set_headers: None,
         };
         assert_eq!(
             resp.to_evaluation_result(),
-            (false, Some("denied".to_string()), None)
+            (false, Some("denied".to_string()), None, None)
         );
 
         // Deny without message
         let resp = RuleResponse {
             allow: Some(AllowPolicy::Bool(false)),
             deny_message: None,
+            set_headers: None,
         };
-        assert_eq!(resp.to_evaluation_result(), (false, None, None));
+        assert_eq!(resp.to_evaluation_result(), (false, None, None, None));
 
         // Shorthand: deny_message only (implies deny)
         let resp = RuleResponse {
             allow: None,
             deny_message: Some("blocked".to_string()),
+            set_headers: None,
         };
         assert_eq!(
             resp.to_evaluation_result(),
-            (false, Some("blocked".to_string()), None)
+            (false, Some("blocked".to_string()), None, None)
         );
 
         // Neither field set (defaults to allow)
         let resp = RuleResponse {
             allow: None,
             deny_message: None,
+            set_headers: None,
         };
-        assert_eq!(resp.to_evaluation_result(), (true, None, None));
+        assert_eq!(resp.to_evaluation_result(), (true, None, None, None));
     }
 
     #[test]
@@ -238,36 +257,36 @@ mod tests {
 
         // Case 1: Simple true
         let resp = RuleResponse::from_string("true");
-        assert_eq!(resp.to_evaluation_result(), (true, None, None));
+        assert_eq!(resp.to_evaluation_result(), (true, None, None, None));
 
         // Case 2: Simple false
         let resp = RuleResponse::from_string("false");
-        assert_eq!(resp.to_evaluation_result(), (false, None, None));
+        assert_eq!(resp.to_evaluation_result(), (false, None, None, None));
 
         // Case 3: JSON allow
         let resp = RuleResponse::from_string(r#"{"allow": true}"#);
-        assert_eq!(resp.to_evaluation_result(), (true, None, None));
+        assert_eq!(resp.to_evaluation_result(), (true, None, None, None));
 
         // Case 4: JSON deny with message
         let resp =
             RuleResponse::from_string(r#"{"allow": false, "deny_message": "Not authorized"}"#);
         assert_eq!(
             resp.to_evaluation_result(),
-            (false, Some("Not authorized".to_string()), None)
+            (false, Some("Not authorized".to_string()), None, None)
         );
 
         // Case 5: Shorthand deny
         let resp = RuleResponse::from_string(r#"{"deny_message": "Access restricted"}"#);
         assert_eq!(
             resp.to_evaluation_result(),
-            (false, Some("Access restricted".to_string()), None)
+            (false, Some("Access restricted".to_string()), None, None)
         );
 
         // Case 6: Plain text message
         let resp = RuleResponse::from_string("Invalid request");
         assert_eq!(
             resp.to_evaluation_result(),
-            (false, Some("Invalid request".to_string()), None)
+            (false, Some("Invalid request".to_string()), None, None)
         );
     }
 
@@ -280,7 +299,7 @@ mod tests {
             Some(AllowPolicy::Limited { max_tx_bytes: 1024 })
         ));
         assert_eq!(resp.deny_message, None);
-        assert_eq!(resp.to_evaluation_result(), (true, None, Some(1024)));
+        assert_eq!(resp.to_evaluation_result(), (true, None, Some(1024), None));
 
         // Test parsing allow with large max_tx_bytes
         let resp = RuleResponse::from_string(r#"{"allow": {"max_tx_bytes": 10485760}}"#);
@@ -290,7 +309,10 @@ mod tests {
                 max_tx_bytes: 10485760
             })
         ));
-        assert_eq!(resp.to_evaluation_result(), (true, None, Some(10485760)));
+        assert_eq!(
+            resp.to_evaluation_result(),
+            (true, None, Some(10485760), None)
+        );
 
         // Test that deny_message is ignored when max_tx_bytes is set
         let resp = RuleResponse::from_string(
@@ -300,6 +322,28 @@ mod tests {
             resp.allow,
             Some(AllowPolicy::Limited { max_tx_bytes: 512 })
         ));
-        assert_eq!(resp.to_evaluation_result(), (true, None, Some(512)));
+        assert_eq!(resp.to_evaluation_result(), (true, None, Some(512), None));
+    }
+
+    #[test]
+    fn test_set_headers_only_applies_to_allowed_requests() {
+        let resp = RuleResponse::from_string(
+            r#"{"allow": true, "set_headers": {"x-httpjail-test": "1"}}"#,
+        );
+        let (allowed, context, max_tx_bytes, set_headers) = resp.to_evaluation_result();
+        assert!(allowed);
+        assert_eq!(context, None);
+        assert_eq!(max_tx_bytes, None);
+        assert_eq!(
+            set_headers
+                .as_ref()
+                .and_then(|headers| headers.get("x-httpjail-test")),
+            Some(&"1".to_string())
+        );
+
+        let denied = RuleResponse::from_string(
+            r#"{"allow": false, "set_headers": {"x-httpjail-test": "2"}}"#,
+        );
+        assert_eq!(denied.to_evaluation_result(), (false, None, None, None));
     }
 }

@@ -82,6 +82,9 @@ r.host === 'facebook.com' ? {deny_message: 'Social media blocked'} : true
 
 // Limit request upload size to 1KB (headers + body)
 ({allow: {max_tx_bytes: 1024}})
+
+// Add/override request headers before forwarding upstream
+({allow: true, set_headers: {'x-httpjail-scope': 'sandbox'}})
 ```
 
 ## Using Return Statements
@@ -103,6 +106,12 @@ JavaScript rules don't allow naked `return` statements. To use returns, wrap you
 ```
 
 ## Common Patterns
+
+`set_headers` notes:
+- Header names are case-insensitive (standard HTTP behavior)
+- Invalid header names/values are ignored
+- `Host` is always normalized to the target upstream host for safety
+- Proxy auth/connection headers are stripped before forwarding
 
 ### Domain Allowlisting
 
