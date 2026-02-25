@@ -1,6 +1,6 @@
 /// Common proxy utilities for HTTP and HTTPS.
 use crate::dangerous_verifier::create_dangerous_client_config;
-use crate::rules::{Action, RuleEngine};
+use crate::rules::{Action, HeaderRewrites, RuleEngine};
 #[allow(unused_imports)]
 use crate::tls::CertificateManager;
 use anyhow::Result;
@@ -166,17 +166,47 @@ static HTTPS_CLIENT: OnceLock<
     >,
 > = OnceLock::new();
 
+/// Apply user-requested request header rewrites.
+/// Invalid header names/values are ignored with a warning.
+pub fn apply_upstream_header_rewrites(headers: &mut hyper::HeaderMap, rewrites: &HeaderRewrites) {
+    for (raw_name, raw_value) in rewrites {
+        let header_name = match hyper::header::HeaderName::from_bytes(raw_name.as_bytes()) {
+            Ok(name) => name,
+            Err(_) => {
+                warn!("Ignoring invalid rewrite header name: {}", raw_name);
+                continue;
+            }
+        };
+
+        let header_value = match hyper::header::HeaderValue::from_str(raw_value) {
+            Ok(value) => value,
+            Err(_) => {
+                warn!("Ignoring invalid rewrite value for header: {}", raw_name);
+                continue;
+            }
+        };
+
+        headers.insert(header_name, header_value);
+    }
+}
+
 /// Prepare a request for forwarding to upstream server
 /// Removes proxy-specific headers and converts body to BoxBody
 pub fn prepare_upstream_request(
     req: Request<Incoming>,
     target_uri: Uri,
     loop_nonce: &str,
+    header_rewrites: Option<&HeaderRewrites>,
 ) -> Request<BoxBody<Bytes, HyperError>> {
     let (mut parts, incoming_body) = req.into_parts();
 
     // Update the URI
     parts.uri = target_uri.clone();
+
+    // Apply user-requested rewrites before sanitization and security normalization.
+    if let Some(rewrites) = header_rewrites {
+        apply_upstream_header_rewrites(&mut parts.headers, rewrites);
+    }
 
     // Remove proxy-specific headers only
     // Don't remove connection-related headers as the client will handle them
@@ -595,7 +625,14 @@ pub async fn handle_http_request(
                 "Request allowed: {} (max_tx_bytes: {:?})",
                 full_url, evaluation.max_tx_bytes
             );
-            match proxy_request(req, &full_url, evaluation.max_tx_bytes, &context.loop_nonce).await
+            match proxy_request(
+                req,
+                &full_url,
+                evaluation.max_tx_bytes,
+                evaluation.header_rewrites.as_ref(),
+                &context.loop_nonce,
+            )
+            .await
             {
                 Ok(resp) => Ok(resp),
                 Err(e) => {
@@ -615,13 +652,15 @@ async fn proxy_request(
     req: Request<Incoming>,
     full_url: &str,
     max_tx_bytes: Option<u64>,
+    header_rewrites: Option<&HeaderRewrites>,
     loop_nonce: &str,
 ) -> Result<Response<BoxBody<Bytes, HyperError>>> {
     // Parse the target URL
     let target_uri = full_url.parse::<Uri>()?;
 
     // Prepare request for upstream
-    let prepared_req = prepare_upstream_request(req, target_uri.clone(), loop_nonce);
+    let prepared_req =
+        prepare_upstream_request(req, target_uri.clone(), loop_nonce, header_rewrites);
 
     // Apply byte limit to outgoing request if specified, converting to BoxBody
     let new_req = if let Some(max_bytes) = max_tx_bytes {
@@ -725,6 +764,7 @@ pub fn create_error_response(
 mod tests {
     use super::*;
     use crate::rules::v8_js::V8JsRuleEngine;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_proxy_server_creation() {
@@ -751,5 +791,24 @@ mod tests {
         assert!((8000..=8999).contains(&http_port));
         assert!((8000..=8999).contains(&https_port));
         assert_ne!(http_port, https_port);
+    }
+
+    #[test]
+    fn test_apply_upstream_header_rewrites_ignores_invalid_names_and_values() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-original", hyper::header::HeaderValue::from_static("a"));
+
+        let mut rewrites = HashMap::new();
+        rewrites.insert("x-original".to_string(), "b".to_string());
+        rewrites.insert("x-added".to_string(), "1".to_string());
+        rewrites.insert("bad header".to_string(), "value".to_string());
+        rewrites.insert("x-bad-value".to_string(), "\nnope".to_string());
+
+        apply_upstream_header_rewrites(&mut headers, &rewrites);
+
+        assert_eq!(headers.get("x-original").unwrap(), "b");
+        assert_eq!(headers.get("x-added").unwrap(), "1");
+        assert!(headers.get("bad header").is_none());
+        assert!(headers.get("x-bad-value").is_none());
     }
 }

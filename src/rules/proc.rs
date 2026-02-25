@@ -1,4 +1,4 @@
-use super::common::{RequestInfo, RuleResponse};
+use super::common::{ParsedRuleResult, RequestInfo, RuleResponse};
 use super::{EvaluationResult, RuleEngineTrait};
 use async_trait::async_trait;
 use hyper::Method;
@@ -107,7 +107,7 @@ impl ProcRuleEngine {
         &self,
         process_guard: &mut Option<ProcessState>,
         json_request: &str,
-    ) -> Result<(bool, Option<String>, Option<u64>), String> {
+    ) -> Result<ParsedRuleResult, String> {
         // Ensure we have a running process
         self.ensure_process_running(process_guard).await?;
 
@@ -165,9 +165,10 @@ impl ProcRuleEngine {
 
                 // Parse response
                 let rule_response = RuleResponse::from_string(response);
-                let (allowed, message, max_tx_bytes) = rule_response.to_evaluation_result();
+                let (allowed, message, max_tx_bytes, header_rewrites) =
+                    rule_response.to_evaluation_result();
 
-                Ok((allowed, message, max_tx_bytes))
+                Ok((allowed, message, max_tx_bytes, header_rewrites))
             }
             Ok(Err(e)) => {
                 error!("Error reading from program: {}", e);
@@ -226,7 +227,7 @@ impl ProcRuleEngine {
                 .send_request_to_process(&mut process_guard, &json_request)
                 .await
             {
-                Ok((allowed, message, max_tx_bytes)) => {
+                Ok((allowed, message, max_tx_bytes, header_rewrites)) => {
                     if allowed {
                         debug!("ALLOW: {} {} (program allowed)", method, url);
                         let mut result = EvaluationResult::allow();
@@ -235,6 +236,9 @@ impl ProcRuleEngine {
                         }
                         if let Some(bytes) = max_tx_bytes {
                             result = result.with_max_tx_bytes(bytes);
+                        }
+                        if let Some(headers) = header_rewrites {
+                            result = result.with_header_rewrites(headers);
                         }
                         return result;
                     } else {

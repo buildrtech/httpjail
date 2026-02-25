@@ -63,7 +63,8 @@ for line in sys.stdin:
     try:
         req = json.loads(line)
         if req['host'] in allowed_hosts:
-            print("true")
+            response = {"allow": True, "set_headers": {"x-httpjail-scope": "sandbox"}}
+            print(json.dumps(response))
         elif req['host'] in upload_hosts:
             # Limit upload endpoints to 1KB requests
             response = {"allow": {"max_tx_bytes": 1024}}
