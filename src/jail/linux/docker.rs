@@ -215,17 +215,17 @@ pub struct DockerLinux {
 }
 
 impl DockerLinux {
-    /// Optional direct TCP passthrough ports for Docker mode.
+    /// Optional extra TCP destination ports intercepted by the HTTP rules engine in Docker mode.
     ///
     /// Format: comma-separated list in HTTPJAIL_DOCKER_EXTRA_TCP_PORTS
-    /// Example: "8787,9000"
-    const EXTRA_DIRECT_TCP_PORTS_ENV: &'static str = "HTTPJAIL_DOCKER_EXTRA_TCP_PORTS";
+    /// Example: "3000,8787"
+    const EXTRA_PROXY_TCP_PORTS_ENV: &'static str = "HTTPJAIL_DOCKER_EXTRA_TCP_PORTS";
 
-    /// Resolve the direct TCP passthrough ports used in Docker mode.
-    fn direct_tcp_passthrough_ports() -> Vec<u16> {
+    /// Resolve the extra TCP ports intercepted by the rules engine in Docker mode.
+    fn extra_proxy_tcp_ports() -> Vec<u16> {
         let mut ports = Vec::new();
 
-        if let Ok(raw) = std::env::var(Self::EXTRA_DIRECT_TCP_PORTS_ENV) {
+        if let Ok(raw) = std::env::var(Self::EXTRA_PROXY_TCP_PORTS_ENV) {
             for token in raw.split(',').map(str::trim).filter(|v| !v.is_empty()) {
                 match token.parse::<u16>() {
                     Ok(port) if port > 0 && !ports.contains(&port) => ports.push(port),
@@ -234,7 +234,7 @@ impl DockerLinux {
                         warn!(
                             "Ignoring invalid value '{}' in {}",
                             token,
-                            Self::EXTRA_DIRECT_TCP_PORTS_ENV
+                            Self::EXTRA_PROXY_TCP_PORTS_ENV
                         );
                     }
                 }
@@ -245,14 +245,22 @@ impl DockerLinux {
         ports
     }
 
-    /// Render nft set literal for TCP ports (e.g. "{ 5432, 5439 }").
-    fn nft_port_set(ports: &[u16]) -> String {
-        let joined = ports
+    fn nft_extra_proxy_port_prerouting_rules(
+        bridge_name: &str,
+        host_ip: &str,
+        http_proxy_port: u16,
+        ports: &[u16],
+    ) -> String {
+        ports
             .iter()
-            .map(u16::to_string)
+            .map(|port| {
+                format!(
+                    "iifname \"{}\" tcp dport {} dnat to {}:{};",
+                    bridge_name, port, host_ip, http_proxy_port
+                )
+            })
             .collect::<Vec<_>>()
-            .join(", ");
-        format!("{{ {} }}", joined)
+            .join("\n                        ")
     }
 
     /// Create a new DockerLinux jail
@@ -453,7 +461,6 @@ impl DockerLinux {
 
         if let Some(network) = docker_network.inner() {
             let bridge_name = network.get_bridge_name()?;
-            let docker_subnet = DockerNetwork::compute_docker_subnet(&self.config.jail_id);
 
             // Get the jail's veth host IP
             let host_ip = LinuxJail::compute_host_ip_for_jail_id(&self.config.jail_id);
@@ -466,15 +473,14 @@ impl DockerLinux {
 
             // Add nftables rules to:
             // 1. DNAT HTTP/HTTPS traffic to the proxy in the jail network
-            // 2. Allow direct TCP passthrough for configured ports in Docker mode
+            // 2. DNAT optional extra TCP destination ports to the HTTP proxy so they
+            //    are evaluated by the rules engine as HTTP traffic
             let table_name = DockerRoutingTable::table_name_from_jail_id(&self.config.jail_id);
-            let direct_tcp_ports = Self::direct_tcp_passthrough_ports();
-            let direct_tcp_port_set = Self::nft_port_set(&direct_tcp_ports);
-
-            let direct_tcp_ports_label = if direct_tcp_ports.is_empty() {
+            let extra_proxy_tcp_ports = Self::extra_proxy_tcp_ports();
+            let extra_proxy_ports_label = if extra_proxy_tcp_ports.is_empty() {
                 "none".to_string()
             } else {
-                direct_tcp_ports
+                extra_proxy_tcp_ports
                     .iter()
                     .map(u16::to_string)
                     .collect::<Vec<_>>()
@@ -482,27 +488,16 @@ impl DockerLinux {
             };
 
             info!(
-                "Docker direct TCP passthrough ports for jail {}: {}",
-                self.config.jail_id, direct_tcp_ports_label
+                "Docker extra TCP proxy ports for jail {}: {}",
+                self.config.jail_id, extra_proxy_ports_label
             );
 
-            let postrouting_passthrough_rule = if direct_tcp_ports.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "ip saddr {} tcp dport {} masquerade;",
-                    docker_subnet, direct_tcp_port_set
-                )
-            };
-
-            let forward_passthrough_rule = if direct_tcp_ports.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "iifname \"{}\" tcp dport {} accept;",
-                    bridge_name, direct_tcp_port_set
-                )
-            };
+            let extra_proxy_prerouting_rules = Self::nft_extra_proxy_port_prerouting_rules(
+                &bridge_name,
+                &host_ip_str,
+                self.config.http_proxy_port,
+                &extra_proxy_tcp_ports,
+            );
 
             // Create nftables rules
             let nft_rules = format!(
@@ -511,18 +506,13 @@ impl DockerLinux {
                         type nat hook prerouting priority -100;
                         iifname \"{}\" tcp dport 80 dnat to {}:{};
                         iifname \"{}\" tcp dport 443 dnat to {}:{};
-                    }}
-
-                    chain postrouting {{
-                        type nat hook postrouting priority 100;
                         {}
                     }}
-                    
+
                     chain forward {{
                         type filter hook forward priority 0;
                         iifname \"{}\" oifname \"vh_{}\" accept;
                         iifname \"vh_{}\" oifname \"{}\" ct state established,related accept;
-                        {}
                         oifname \"{}\" ct state established,related accept;
                     }}
                 }}",
@@ -533,12 +523,11 @@ impl DockerLinux {
                 bridge_name,
                 host_ip_str,
                 self.config.https_proxy_port,
-                postrouting_passthrough_rule,
+                extra_proxy_prerouting_rules,
                 bridge_name,
                 self.config.jail_id,
                 self.config.jail_id,
                 bridge_name,
-                forward_passthrough_rule,
                 bridge_name
             );
 
@@ -653,34 +642,42 @@ mod tests {
     use super::DockerLinux;
 
     #[test]
-    fn direct_tcp_passthrough_ports_defaults_to_empty() {
+    fn extra_proxy_tcp_ports_defaults_to_empty() {
         unsafe {
-            std::env::remove_var(DockerLinux::EXTRA_DIRECT_TCP_PORTS_ENV);
+            std::env::remove_var(DockerLinux::EXTRA_PROXY_TCP_PORTS_ENV);
         }
 
-        let ports = DockerLinux::direct_tcp_passthrough_ports();
+        let ports = DockerLinux::extra_proxy_tcp_ports();
         assert_eq!(ports, Vec::<u16>::new());
     }
 
     #[test]
-    fn direct_tcp_passthrough_ports_reads_valid_unique_extra_ports() {
+    fn extra_proxy_tcp_ports_reads_valid_unique_extra_ports() {
         unsafe {
             std::env::set_var(
-                DockerLinux::EXTRA_DIRECT_TCP_PORTS_ENV,
+                DockerLinux::EXTRA_PROXY_TCP_PORTS_ENV,
                 "8787, 9000,8787,invalid,0",
             );
         }
 
-        let ports = DockerLinux::direct_tcp_passthrough_ports();
+        let ports = DockerLinux::extra_proxy_tcp_ports();
         assert_eq!(ports, vec![8787, 9000]);
 
         unsafe {
-            std::env::remove_var(DockerLinux::EXTRA_DIRECT_TCP_PORTS_ENV);
+            std::env::remove_var(DockerLinux::EXTRA_PROXY_TCP_PORTS_ENV);
         }
     }
 
     #[test]
-    fn nft_port_set_renders_braced_comma_separated_list() {
-        assert_eq!(DockerLinux::nft_port_set(&[5432, 8787]), "{ 5432, 8787 }");
+    fn nft_extra_proxy_port_prerouting_rules_redirect_to_http_proxy() {
+        let rules = DockerLinux::nft_extra_proxy_port_prerouting_rules(
+            "br-test",
+            "10.99.10.1",
+            8040,
+            &[3000, 8787],
+        );
+
+        assert!(rules.contains("iifname \"br-test\" tcp dport 3000 dnat to 10.99.10.1:8040;"));
+        assert!(rules.contains("iifname \"br-test\" tcp dport 8787 dnat to 10.99.10.1:8040;"));
     }
 }

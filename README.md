@@ -65,10 +65,10 @@ httpjail --server --js "true"
 # Run Docker containers with network isolation (Linux only)
 httpjail --js "r.host === 'api.github.com'" --docker-run -- --rm alpine:latest wget -qO- https://api.github.com
 
-# Add raw TCP passthrough ports for Docker mode (comma-separated)
-HTTPJAIL_DOCKER_EXTRA_TCP_PORTS=5432,5439 httpjail --js "true" --docker-run -- --rm postgres:17 psql -h 10.0.10.112 -p 5432 -U user db
-HTTPJAIL_DOCKER_EXTRA_TCP_PORTS=5432,5439 httpjail --js "true" --docker-run -- --rm postgres:17 psql -h redshift-cluster.example.us-east-1.redshift.amazonaws.com -p 5439 -U user db
-HTTPJAIL_DOCKER_EXTRA_TCP_PORTS=8787 httpjail --js "true" --docker-run -- --rm alpine:latest wget -qO- -T 3 http://host.docker.internal:8787/health
+# Intercept additional HTTP destination ports for Docker mode (comma-separated)
+# These ports are still evaluated by your rules engine.
+HTTPJAIL_DOCKER_EXTRA_TCP_PORTS=3000 httpjail --js "r.host === 'host.docker.internal'" --docker-run -- --rm alpine:latest wget -qO- -T 3 http://host.docker.internal:3000/health
+HTTPJAIL_DOCKER_EXTRA_TCP_PORTS=3000,8787 httpjail --js "true" --docker-run -- --rm alpine:latest sh -lc "wget -qO- -T 3 http://host.docker.internal:3000/health && wget -qO- -T 3 http://host.docker.internal:8787/ready"
 ```
 
 ## Documentation
