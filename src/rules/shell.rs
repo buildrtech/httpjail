@@ -104,7 +104,13 @@ impl ShellRuleEngine {
 
 #[async_trait]
 impl RuleEngineTrait for ShellRuleEngine {
-    async fn evaluate(&self, method: Method, url: &str, requester_ip: &str) -> EvaluationResult {
+    async fn evaluate_with_headers(
+        &self,
+        method: Method,
+        url: &str,
+        requester_ip: &str,
+        _headers: &hyper::HeaderMap,
+    ) -> EvaluationResult {
         let (allowed, context) = self.execute_script(method.clone(), url, requester_ip).await;
 
         if allowed {

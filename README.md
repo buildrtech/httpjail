@@ -50,7 +50,7 @@ httpjail --sh "/path/to/script.sh" -- ./my-app
 # Use line processor for request evaluation (efficient persistent process)
 httpjail --proc /path/to/filter.py -- ./my-app
 # Program receives JSON on stdin (one per line) and outputs allow/deny decisions
-# stdin  -> {"method": "GET", "url": "https://api.github.com", "host": "api.github.com", ...}
+# stdin  -> {"method": "GET", "url": "https://api.github.com", "host": "api.github.com", "headers": {...}, ...}
 # stdout -> true
 
 # Rewrite/add request headers when a request is allowed

@@ -192,8 +192,9 @@ impl ProcRuleEngine {
         method: Method,
         url: &str,
         requester_ip: &str,
+        headers: &hyper::HeaderMap,
     ) -> EvaluationResult {
-        let request_info = match RequestInfo::from_request(&method, url, requester_ip) {
+        let request_info = match RequestInfo::from_request(&method, url, requester_ip, headers) {
             Ok(info) => info,
             Err(e) => {
                 debug!("Failed to parse request: {}", e);
@@ -266,8 +267,15 @@ impl ProcRuleEngine {
 
 #[async_trait]
 impl RuleEngineTrait for ProcRuleEngine {
-    async fn evaluate(&self, method: Method, url: &str, requester_ip: &str) -> EvaluationResult {
-        self.execute_program(method, url, requester_ip).await
+    async fn evaluate_with_headers(
+        &self,
+        method: Method,
+        url: &str,
+        requester_ip: &str,
+        headers: &hyper::HeaderMap,
+    ) -> EvaluationResult {
+        self.execute_program(method, url, requester_ip, headers)
+            .await
     }
 
     fn name(&self) -> &str {

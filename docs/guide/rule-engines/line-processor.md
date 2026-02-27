@@ -21,7 +21,10 @@ Each request is sent as a single JSON line:
   "method": "GET",
   "host": "example.com",
   "scheme": "https",
-  "path": "/api"
+  "path": "/api",
+  "headers": {
+    "user-agent": "curl/8.7.1"
+  }
 }
 ```
 

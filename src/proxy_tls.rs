@@ -227,6 +227,29 @@ async fn handle_transparent_tls(
     Ok(())
 }
 
+fn parse_connect_request_headers(header_lines: &[String]) -> hyper::HeaderMap {
+    let mut headers = hyper::HeaderMap::new();
+
+    for line in header_lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+
+        let header_name = match hyper::header::HeaderName::from_bytes(name.trim().as_bytes()) {
+            Ok(header_name) => header_name,
+            Err(_) => continue,
+        };
+        let header_value = match hyper::header::HeaderValue::from_str(value.trim()) {
+            Ok(header_value) => header_value,
+            Err(_) => continue,
+        };
+
+        headers.append(header_name, header_value);
+    }
+
+    headers
+}
+
 /// Handle a CONNECT tunnel request with TLS interception
 async fn handle_connect_tunnel(
     stream: TcpStream,
@@ -275,7 +298,7 @@ async fn handle_connect_tunnel(
     info!("CONNECT request for: {}", target);
 
     // Read the rest of the headers until we find the empty line
-    let mut headers = vec![first_line.clone()];
+    let mut header_lines = Vec::new();
     let start_time = tokio::time::Instant::now();
     loop {
         // Check if we've exceeded the total timeout
@@ -292,7 +315,7 @@ async fn handle_connect_tunnel(
                 if line == "\r\n" || line == "\n" {
                     break;
                 }
-                headers.push(line);
+                header_lines.push(line);
             }
             Ok(Err(e)) => {
                 debug!("Error reading header: {}", e);
@@ -306,11 +329,17 @@ async fn handle_connect_tunnel(
     }
 
     // Check if this host is allowed
+    let connect_headers = parse_connect_request_headers(&header_lines);
     let full_url = format!("https://{}", target);
     let requester_ip = remote_addr.ip().to_string();
     let evaluation = context
         .rule_engine
-        .evaluate_with_context_and_ip(Method::GET, &full_url, &requester_ip)
+        .evaluate_with_context_and_ip_and_headers(
+            Method::GET,
+            &full_url,
+            &requester_ip,
+            &connect_headers,
+        )
         .await;
     match evaluation.action {
         Action::Allow => {
@@ -467,6 +496,7 @@ async fn handle_decrypted_https_request(
 ) -> Result<Response<BoxBody<Bytes, HyperError>>, std::convert::Infallible> {
     let method = req.method().clone();
     let uri = req.uri().clone();
+    let headers = req.headers().clone();
 
     // Build the full URL for rule evaluation
     let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
@@ -481,7 +511,12 @@ async fn handle_decrypted_https_request(
     let requester_ip = remote_addr.ip().to_string();
     let evaluation = context
         .rule_engine
-        .evaluate_with_context_and_ip(method.clone(), &full_url, &requester_ip)
+        .evaluate_with_context_and_ip_and_headers(
+            method.clone(),
+            &full_url,
+            &requester_ip,
+            &headers,
+        )
         .await;
     match evaluation.action {
         Action::Allow => {

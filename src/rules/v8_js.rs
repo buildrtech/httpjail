@@ -9,7 +9,7 @@ use crate::rules::console_log;
 use crate::rules::{EvaluationResult, HeaderRewrites, RuleEngineTrait};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use hyper::Method;
+use hyper::{HeaderMap, Method};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -93,8 +93,9 @@ impl V8JsRuleEngine {
         method: &Method,
         url: &str,
         requester_ip: &str,
+        headers: &HeaderMap,
     ) -> ParsedRuleResult {
-        let request_info = match RequestInfo::from_request(method, url, requester_ip) {
+        let request_info = match RequestInfo::from_request(method, url, requester_ip, headers) {
             Ok(info) => info,
             Err(e) => {
                 warn!("Failed to parse request info: {}", e);
@@ -327,14 +328,20 @@ impl V8JsRuleEngine {
         method: Method,
         url: &str,
         requester_ip: &str,
+        headers: &HeaderMap,
     ) -> ParsedRuleResult {
         let method_clone = method.clone();
         let url_clone = url.to_string();
         let ip_clone = requester_ip.to_string();
+        let headers_clone = headers.clone();
 
         tokio::task::spawn_blocking(move || {
-            let request_info = match RequestInfo::from_request(&method_clone, &url_clone, &ip_clone)
-            {
+            let request_info = match RequestInfo::from_request(
+                &method_clone,
+                &url_clone,
+                &ip_clone,
+                &headers_clone,
+            ) {
                 Ok(info) => info,
                 Err(e) => {
                     warn!("Failed to parse request info: {}", e);
@@ -399,7 +406,13 @@ impl V8JsRuleEngine {
 
 #[async_trait]
 impl RuleEngineTrait for V8JsRuleEngine {
-    async fn evaluate(&self, method: Method, url: &str, requester_ip: &str) -> EvaluationResult {
+    async fn evaluate_with_headers(
+        &self,
+        method: Method,
+        url: &str,
+        requester_ip: &str,
+        headers: &HeaderMap,
+    ) -> EvaluationResult {
         // Check if file has changed and reload if necessary
         self.check_and_reload_file().await;
 
@@ -408,7 +421,7 @@ impl RuleEngineTrait for V8JsRuleEngine {
 
         // Execute JavaScript in blocking task
         let (allowed, context, max_tx_bytes, header_rewrites) =
-            Self::execute_js_blocking(js_code, method, url, requester_ip).await;
+            Self::execute_js_blocking(js_code, method, url, requester_ip, headers).await;
 
         // Build and return the result
         Self::build_evaluation_result(allowed, context, max_tx_bytes, header_rewrites)

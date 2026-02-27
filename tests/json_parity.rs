@@ -115,6 +115,54 @@ async fn test_response_parity() {
 }
 
 #[tokio::test]
+async fn test_request_headers_parity() {
+    let proc_script = create_temp_script(
+        r#"#!/usr/bin/env python3
+import sys
+import json
+for line in sys.stdin:
+    request = json.loads(line.strip())
+    print(json.dumps({"deny_message": json.dumps(request["headers"])}))
+    sys.stdout.flush()
+"#,
+    );
+
+    let proc_engine = ProcRuleEngine::new(proc_script.to_str().unwrap().to_string());
+    let js_engine =
+        V8JsRuleEngine::new("({deny_message: JSON.stringify(r.headers)})".to_string()).unwrap();
+
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert("x-httpjail-test", "present".parse().unwrap());
+
+    let proc_result = proc_engine
+        .evaluate_with_headers(
+            Method::GET,
+            "https://example.com/test",
+            "127.0.0.1",
+            &headers,
+        )
+        .await;
+    let js_result = js_engine
+        .evaluate_with_headers(
+            Method::GET,
+            "https://example.com/test",
+            "127.0.0.1",
+            &headers,
+        )
+        .await;
+
+    assert!(matches!(proc_result.action, Action::Deny));
+    assert!(matches!(js_result.action, Action::Deny));
+
+    let proc_headers: serde_json::Value =
+        serde_json::from_str(&proc_result.context.unwrap()).unwrap();
+    let js_headers: serde_json::Value = serde_json::from_str(&js_result.context.unwrap()).unwrap();
+
+    assert_eq!(proc_headers, js_headers);
+    assert_eq!(proc_headers["x-httpjail-test"], "present");
+}
+
+#[tokio::test]
 async fn test_console_api() {
     // Test that console API methods work without throwing errors.
     // The console output is visible in test output when run with RUST_LOG=debug,

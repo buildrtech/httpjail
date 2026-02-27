@@ -6,7 +6,7 @@ pub mod v8_js;
 
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
-use hyper::Method;
+use hyper::{HeaderMap, Method};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -73,7 +73,19 @@ impl EvaluationResult {
 /// including system paths, error codes, or internal details.
 #[async_trait]
 pub trait RuleEngineTrait: Send + Sync {
-    async fn evaluate(&self, method: Method, url: &str, requester_ip: &str) -> EvaluationResult;
+    async fn evaluate(&self, method: Method, url: &str, requester_ip: &str) -> EvaluationResult {
+        let headers = HeaderMap::new();
+        self.evaluate_with_headers(method, url, requester_ip, &headers)
+            .await
+    }
+
+    async fn evaluate_with_headers(
+        &self,
+        method: Method,
+        url: &str,
+        requester_ip: &str,
+        headers: &HeaderMap,
+    ) -> EvaluationResult;
 
     fn name(&self) -> &str;
 }
@@ -94,10 +106,16 @@ impl LoggingRuleEngine {
 
 #[async_trait]
 impl RuleEngineTrait for LoggingRuleEngine {
-    async fn evaluate(&self, method: Method, url: &str, requester_ip: &str) -> EvaluationResult {
+    async fn evaluate_with_headers(
+        &self,
+        method: Method,
+        url: &str,
+        requester_ip: &str,
+        headers: &HeaderMap,
+    ) -> EvaluationResult {
         let result = self
             .engine
-            .evaluate(method.clone(), url, requester_ip)
+            .evaluate_with_headers(method.clone(), url, requester_ip, headers)
             .await;
 
         if let Some(log) = &self.request_log
@@ -161,6 +179,18 @@ impl RuleEngine {
     ) -> EvaluationResult {
         self.inner.evaluate(method, url, requester_ip).await
     }
+
+    pub async fn evaluate_with_context_and_ip_and_headers(
+        &self,
+        method: Method,
+        url: &str,
+        requester_ip: &str,
+        headers: &HeaderMap,
+    ) -> EvaluationResult {
+        self.inner
+            .evaluate_with_headers(method, url, requester_ip, headers)
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -200,5 +230,36 @@ mod tests {
 
         let contents = std::fs::read_to_string(log_file.path()).unwrap();
         assert!(contents.contains("- GET https://blocked.com"));
+    }
+
+    #[tokio::test]
+    async fn test_headers_are_passed_to_rules() {
+        let engine =
+            V8JsRuleEngine::new("r.headers['x-httpjail-test'] === 'present'".to_string()).unwrap();
+        let rule_engine = RuleEngine::from_trait(Box::new(engine), None);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-httpjail-test", "present".parse().unwrap());
+
+        let result = rule_engine
+            .evaluate_with_context_and_ip_and_headers(
+                Method::GET,
+                "https://example.com",
+                "127.0.0.1",
+                &headers,
+            )
+            .await;
+        assert!(matches!(result.action, Action::Allow));
+
+        let empty_headers = HeaderMap::new();
+        let result = rule_engine
+            .evaluate_with_context_and_ip_and_headers(
+                Method::GET,
+                "https://example.com",
+                "127.0.0.1",
+                &empty_headers,
+            )
+            .await;
+        assert!(matches!(result.action, Action::Deny));
     }
 }

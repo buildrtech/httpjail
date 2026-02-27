@@ -11,6 +11,7 @@ Your JavaScript code receives a `r` object with these properties:
 - `r.host` - Hostname
 - `r.scheme` - URL scheme (http/https)
 - `r.path` - URL path
+- `r.headers` - Request headers as a string map (lowercase header names)
 
 ## Basic Usage
 

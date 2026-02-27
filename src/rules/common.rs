@@ -1,6 +1,7 @@
 use super::HeaderRewrites;
-use hyper::Method;
+use hyper::{HeaderMap, Method};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use url::Url;
 
 #[derive(Debug, Clone, Serialize)]
@@ -11,11 +12,29 @@ pub struct RequestInfo {
     pub host: String,
     pub path: String,
     pub requester_ip: String,
+    pub headers: HashMap<String, String>,
 }
 
 impl RequestInfo {
-    pub fn from_request(method: &Method, url: &str, requester_ip: &str) -> Result<Self, String> {
+    pub fn from_request(
+        method: &Method,
+        url: &str,
+        requester_ip: &str,
+        headers: &HeaderMap,
+    ) -> Result<Self, String> {
         let parsed_url = Url::parse(url).map_err(|e| format!("Failed to parse URL: {}", e))?;
+
+        let mut serialized_headers = HashMap::new();
+        for header_name in headers.keys() {
+            let joined_value = headers
+                .get_all(header_name)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            serialized_headers.insert(header_name.as_str().to_string(), joined_value);
+        }
 
         Ok(RequestInfo {
             url: url.to_string(),
@@ -24,6 +43,7 @@ impl RequestInfo {
             host: parsed_url.host_str().unwrap_or("").to_string(),
             path: parsed_url.path().to_string(),
             requester_ip: requester_ip.to_string(),
+            headers: serialized_headers,
         })
     }
 }

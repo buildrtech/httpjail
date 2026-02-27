@@ -617,7 +617,7 @@ pub async fn handle_http_request(
     let requester_ip = remote_addr.ip().to_string();
     let evaluation = context
         .rule_engine
-        .evaluate_with_context_and_ip(method, &full_url, &requester_ip)
+        .evaluate_with_context_and_ip_and_headers(method, &full_url, &requester_ip, &headers)
         .await;
     match evaluation.action {
         Action::Allow => {
