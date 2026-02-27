@@ -128,38 +128,19 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-build_native() {
-  echo "Building httpjail natively for $TARGET..."
-  if ! rustup target list --installed | grep -q "^${TARGET}$"; then
-    rustup target add "$TARGET"
-  fi
-  RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target "$TARGET"
-}
-
-build_docker() {
-  echo "Building httpjail in Docker ($DOCKER_IMAGE) for $TARGET..."
-  docker run --rm \
-    --platform "$DOCKER_PLATFORM" \
-    -e TARGET="$TARGET" \
-    -v "$REPO_ROOT":/work \
-    -w /work \
-    "$DOCKER_IMAGE" \
-    bash -lc '
-      set -euo pipefail
-      export PATH=/usr/local/cargo/bin:$PATH
-      apt-get update >/dev/null
-      apt-get install -y --no-install-recommends pkg-config cmake clang make gcc g++ perl >/dev/null
-      rustup target add "$TARGET" >/dev/null 2>&1 || true
-      RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target "$TARGET"
-    '
-}
-
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  if [[ "$USE_DOCKER" -eq 1 ]]; then
-    build_docker
-  else
-    build_native
+  BUILD_SCRIPT=(
+    "$REPO_ROOT/scripts/build-linux-binary.sh"
+    --target "$TARGET"
+    --docker-image "$DOCKER_IMAGE"
+    --docker-platform "$DOCKER_PLATFORM"
+  )
+
+  if [[ "$USE_DOCKER" -eq 0 ]]; then
+    BUILD_SCRIPT+=(--native-build)
   fi
+
+  "${BUILD_SCRIPT[@]}"
 fi
 
 BINARY="target/$TARGET/release/httpjail"
