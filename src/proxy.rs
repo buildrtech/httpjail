@@ -33,7 +33,7 @@ use tracing::{debug, error, info, warn};
 
 pub const HTTPJAIL_HEADER: &str = "HTTPJAIL";
 pub const HTTPJAIL_HEADER_VALUE: &str = "true";
-pub const BLOCKED_MESSAGE: &str = "Request blocked by httpjail";
+pub const BLOCKED_MESSAGE: &str = "Request blocked";
 
 /// Header added to outgoing requests to detect loops (Issue #84)
 /// Contains comma-separated nonces of all httpjail instances in the proxy chain.
@@ -42,7 +42,7 @@ pub const HTTPJAIL_LOOP_DETECTION_HEADER: &str = "Httpjail-Loop-Prevention";
 
 /// Create a raw HTTP/1.1 403 Forbidden response for CONNECT tunnels
 pub fn create_connect_403_response() -> &'static [u8] {
-    b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 27\r\n\r\nRequest blocked by httpjail"
+    b"HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: 15\r\n\r\nRequest blocked"
 }
 
 /// Create a raw HTTP/1.1 403 Forbidden response for CONNECT tunnels with context

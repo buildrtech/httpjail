@@ -38,7 +38,7 @@ fn test_weak_mode_blocks_http_correctly() {
             // HTTP blocking returns a 403 response, so curl succeeds but with forbidden message
             // Should contain the blocked message
             assert!(
-                stdout.contains("Request blocked by httpjail") || exit_code != 0,
+                stdout.trim() == "Request blocked" || exit_code != 0,
                 "Expected request to be blocked, but got normal response"
             );
 
